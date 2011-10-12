@@ -1,1 +1,5 @@
-whisper application
+Whisper Application
+-------------------
+Send a call to Tropo and when answered call a user of OnSIP
+such that the user hears "do you want to take a call from Mr. Joe Smith?"
+and if the user says 'yes' the call is put through, otherwise it goes to voicemail.

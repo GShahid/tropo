@@ -1,0 +1,179 @@
+<?php
+
+//
+// Tropo Whisper App
+//
+// A conference is used as a 'bridge' to implement a whispher application where a contact is provided with
+// the option of accepting or declining an inbound call. When an inbound call comes in it is placed in a
+// conference. Before putting the call in a conference this same script is launched via the Tropo API which 
+// then makes an outbound call to the callee. If the callee answers they are prompted to accept the call. If
+// they accept they are also put in the conference thus 'bridging' the two call legs. If the callee declines
+// or does not answer, the caller is removed from the conference by yet another call to the Tropo REST API 
+// to send an event which signals the caller exit the conference. At that point the caller is sent to
+// voicemail if a failover address is provided otherwise the caller is hung up on.
+//
+
+// the callee for the outbound call leg
+$outboundCallee = "sip:you@yourdomain.onsip.com";
+// voicemail (set to 'NULL' for no voicemail)
+$outboundVoicemail = "sip:voicemail@yourdomain.onsip.com";
+// the Tropo voice outbound token (effectively a password)
+$outboundToken = 'your-token';
+
+// number of seconds to wait for call to be answered
+$outboundCallTimeout = 30;
+// number of attempts the callee will be given to respond
+$outboundAskAttempts = 2;
+// number of seconds to wait for a response from the callee
+$outboundAskTimeout = 5;
+// message played to the oubound callee
+$outboundCalleeDeclinedMessage = "You have declined the call.  Goodbye.";
+$outboundCalleeBadChoiceMessage = "I'm sorry, I didn't get that. Please say yes or no";
+// the URL used to signal the inbound caller to exit the conference
+$outboundCurloptURL = 'https://api.tropo.com/1.0/sessions/' . $session . '/signals?action=signal&value=exit';
+$outboundCurloptConnecttimeout = 2;
+
+// messages played to the inbound caller
+$inboundCallerHoldMessage = "Please hold while we connect your call.";
+$inboundCallerDeclinedMessage = "Your call has been declined.  Goodbye.";
+$inboundCallerVoicemailMessage = "Your call has been declined.  Please wait while we transfer you to voicemail.";
+// the URL of this application which is used to trigger the outbound call
+$inboundCurloptURL = 'http://api.tropo.com/1.0/sessions?action=create' . 
+  '&token=' . $outboundToken . '&caller=' . $currentCall->callerID . '&session=' . $currentCall->sessionId;
+$inboundCurloptConnecttimeout = 2;
+
+// the id of the conference room to use as a 'bridge'.
+$conferenceId = "1234";
+
+
+// signal the caller to exit the conference bridge by sending an 'interrupt'.
+function signalConferenceExit() {
+  global $outboundCurloptURL;
+  global $outboundCurloptConnecttimeout;    
+  $curl_handle=curl_init(); 
+  curl_setopt($curl_handle, CURLOPT_URL, $outboundCurloptURL);
+  curl_setopt($curl_handle, CURLOPT_CONNECTTIMEOUT, $outboundCurloptConnecttimeout);
+  curl_exec($curl_handle); 
+  curl_close($curl_handle);
+}
+
+// choice callback
+// - callee made a valid selection
+// - if 'yes', connect callee to conference
+// - if 'no', disconnect caller and provide feeback to callee
+function onChoice($event) {
+  global $outboundCalleeDeclinedMessage;
+  global $conferenceId;
+
+  // if the callee accepted the call put the callee into the conference
+  if ($event->value == "yes") {
+    conference($conferenceId);
+  }
+  // else if the callee declined the call 
+  else if ($event->value == "no") {
+    // provide feedback to the callee that they have declined the call
+    say($outboundCalleeDeclinedMessage);
+    sleep(15); // workaround for timing bug in tropo (this line should not be needed)
+    // signal the caller to exit the conference bridge by sending an 'interrupt'.
+    signalConferenceExit();
+  }
+  // should never get here
+  else {
+    say("An error has occurred, but this one never happens.  Goodbye.");
+  }
+}
+
+// bad choice callback
+//  - callee made an invalid selection
+//  - let them know about it
+function onBadChoice($event) {
+  global $outboundCalleeBadChoiceMessage;
+  say($outboundCalleeBadChoiceMessage);
+}
+
+// error callback
+// - some error occured
+// - disconnect the caller
+function onError($event) {
+  sleep(15); // workaround for timing bug in tropo (this line should not be needed)
+  signalConferenceExit();
+}
+
+// hangup callback
+// - callee hungup
+// - disconnect the caller
+function onHangup($event) {
+  sleep(15); // workaround for timing bug in tropo (this line should not be needed)
+  signalConferenceExit();
+}
+
+// timeout callback
+// - timed out waiting on callee
+// - disconnect the caller
+function onTimeout($event) {
+  sleep(15); // workaround for timing bug in tropo (this line should not be needed)
+  signalConferenceExit();
+}
+
+
+//
+// Main
+//
+
+// assume that caller-id indicates this is an inbound call so make an outbound call to the callee
+if ($currentCall->callerID) {
+  //
+  // handle incoming leg
+  //
+
+  // we trigger an outbound call to the callee via a request to the tropo api
+  $curl_handle=curl_init(); 
+  curl_setopt($curl_handle, CURLOPT_CONNECTTIMEOUT, $inboundCurloptConnecttimeout); 
+  curl_setopt($curl_handle, CURLOPT_URL, $inboundCurloptURL);
+  curl_exec($curl_handle); 
+  curl_close($curl_handle); 
+
+  // tell the caller to hold on while we wait on the callee
+  say($inboundCallerHoldMessage);
+  // put the caller into the conference
+  conference($conferenceId, array("allowSignals" => "exit"));
+  // the caller will be booted from the conference if the callee declines,
+  // so let the caller know that they have been rejected and then hangup.
+  //  say($inboundCallerVoicemailMessage);
+  //  transfer($outboundVoicemail, array("timeout" => $outboundCallTimeout,
+  //                                     "callerID" => $caller));
+  if($outboundVoicemail) {
+    say($inboundCallerVoicemailMessage);
+    transfer($outboundVoicemail, array("timeout" => $outboundCallTimeout,
+                                       "callerID" => $caller));
+  }
+  else {
+    say($inboundCallerDeclinedMessage);
+  }
+}
+// otherwise handle an incoming call
+else {
+  //
+  // handle outgoing leg
+  //
+  call($outboundCallee, array("timeout" => $outboundCallTimeout,
+                              "callerID" => $caller,
+                              "onTimeout" => "onTimeout",
+                              "onCallFailure" => "onError"));
+  // say 'Hi" to the callee
+  say("Hi");
+  // and wait a second to make sure the RTP has been setup
+  sleep(1);
+  // query the callee in regards to their desire to answer the call
+  ask("Do you want to be connected to " . $caller ."?", 
+      array("choices" => "yes, no",
+            "attempts" => $outboundAskAttempts,
+            "timeout" => $outboundAskTimeout,
+            "onChoice" => "onChoice",
+            "onBadChoice" => "onBadChoice",
+            "onError" => "onError",
+            "onHangup" => "onHangup",
+            "onTimeout" => "onTimeout"));
+}
+
+?>
